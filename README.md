@@ -102,3 +102,48 @@ Add these secrets via the GitHub UI (Settings → Secrets and variables → Acti
 With these secrets configured, the workflow `.github/workflows/daily-clickhouse-export.yml` will run daily and upload the `Main/` folder and produced `exports/` CSV files as artifacts.
 
 # click-house
+
+S3 / AWS configuration
+
+This exporter writes CSV files into a customer S3 bucket. For your project use the bucket name (not the ARN) in `S3_BUCKET`:
+
+- Bucket name: `my-clickhouse-project` (example)
+- AWS Region: `us-east-2` (US East — Ohio)
+
+We recommend using a small prefix to keep customer exports organized. Example prefix used in `.env.example`:
+
+```
+S3_KEY_PREFIX=customer-exports/Main
+```
+
+Minimal IAM policy (least-privilege)
+
+Create an IAM user or role for CI and attach a policy that allows PutObject to the target bucket (and GetBucketLocation). Replace `my-clickhouse-project` with your bucket name.
+
+```json
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Sid": "AllowPutObjects",
+			"Effect": "Allow",
+			"Action": [
+				"s3:PutObject",
+				"s3:PutObjectAcl",
+				"s3:PutObjectTagging"
+			],
+			"Resource": "arn:aws:s3:::my-clickhouse-project/*"
+		},
+		{
+			"Sid": "AllowGetBucketLocation",
+			"Effect": "Allow",
+			"Action": "s3:GetBucketLocation",
+			"Resource": "arn:aws:s3:::my-clickhouse-project"
+		}
+	]
+}
+```
+
+If you'd like to restrict uploads to a specific prefix, change the object resource to `arn:aws:s3:::my-clickhouse-project/customer-exports/*` and set `S3_KEY_PREFIX` accordingly.
+
+After creating IAM credentials, add them as GitHub repository secrets (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) and set `S3_BUCKET` and `AWS_REGION`.
