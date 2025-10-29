@@ -45,4 +45,60 @@ Notes
 - The ClickHouse query uses `quantileExact(0.9)` to compute the 90th percentile and `avg()` for the average.
 - CSV format uses `FORMAT CSVWithNames` so the first row contains column names.
 - The script also writes a local copy to `exports/` so the workflow can upload it as an artifact.
+ClickHouse connection example
+
+If you want to test the ClickHouse endpoint directly from your shell, avoid pasting secrets into files tracked by git. Use environment variables (or GitHub Secrets for CI).
+
+Example (local shell). Set the URL, user and password as environment variables and run a quick SELECT 1 to validate connectivity:
+
+```bash
+export CLICKHOUSE_URL="https://v0tapvvnar.us-east-2.aws.clickhouse.cloud:8443"
+export CLICKHOUSE_USER="default"
+# set CLICKHOUSE_PASSWORD in your shell (do not commit)
+# export CLICKHOUSE_PASSWORD="<your_password>"
+
+# simple health check
+curl --user "${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}" --data-binary 'SELECT 1' "${CLICKHOUSE_URL}"
+```
+
+Run the production query for a date (CSV output). This uses `FORMAT CSVWithNames` so the first row is headers:
+
+```bash
+DATE="$(date -u -d 'yesterday' +%F)"  # GNU date; on macOS: date -v -1d +%F
+cat <<'SQL' > /tmp/query.sql
+SELECT
+	agent_id,
+	avg(call_duration_sec) AS avg_call_length_sec,
+	quantileExact(0.9)(call_duration_sec) AS p90_call_length_sec
+FROM conversations
+WHERE call_start >= toDateTime('${DATE} 00:00:00')
+	AND call_start < toDateTime('${DATE} 00:00:00') + INTERVAL 1 DAY
+GROUP BY agent_id
+ORDER BY agent_id
+FORMAT CSVWithNames
+SQL
+
+curl --user "${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}" --data-binary @/tmp/query.sql "${CLICKHOUSE_URL}" -o agent_stats_${DATE}.csv
+```
+
+Security note
+
+You shared a ClickHouse credential earlier in chat. If that credential is sensitive and has been exposed, rotate it immediately and then update the new value in the GitHub secret. Never commit passwords or secrets to the repository.
+
+GitHub Actions secrets
+
+Add these secrets via the GitHub UI (Settings → Secrets and variables → Actions) or `gh`:
+
+ - CLICKHOUSE_URL
+ - CLICKHOUSE_USER
+ - CLICKHOUSE_PASSWORD
+ - CLICKHOUSE_DATABASE (optional)
+ - S3_BUCKET
+ - S3_KEY_PREFIX (optional)
+ - AWS_ACCESS_KEY_ID
+ - AWS_SECRET_ACCESS_KEY
+ - AWS_REGION
+
+With these secrets configured, the workflow `.github/workflows/daily-clickhouse-export.yml` will run daily and upload the `Main/` folder and produced `exports/` CSV files as artifacts.
+
 # click-house

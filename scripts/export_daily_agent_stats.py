@@ -19,6 +19,7 @@ import sys
 import datetime
 import logging
 from pathlib import Path
+import argparse
 
 # Ensure we can import from src when executed from repo root
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -62,10 +63,16 @@ FORMAT CSVWithNames
 
 def main() -> int:
     env = os.environ
+    parser = argparse.ArgumentParser(description="Export ClickHouse agent stats to S3 or local file")
+    parser.add_argument("--no-upload", action="store_true", help="Only query ClickHouse and write local CSV, do not upload to S3")
+    args = parser.parse_args()
     clickhouse_url = env.get("CLICKHOUSE_URL")
     s3_bucket = env.get("S3_BUCKET")
-    if not clickhouse_url or not s3_bucket:
-        logger.error("CLICKHOUSE_URL and S3_BUCKET must be set as environment variables")
+    if not clickhouse_url:
+        logger.error("CLICKHOUSE_URL must be set as an environment variable")
+        return 2
+    if not args.no_upload and not s3_bucket:
+        logger.error("S3_BUCKET must be set as an environment variable unless --no-upload is used")
         return 2
 
     cfg = ExportConfig(
@@ -103,13 +110,6 @@ def main() -> int:
     )
     s3 = S3Client(s3_cfg)
 
-    try:
-        logger.info("Uploading %s to s3://%s/%s", filename, s3_cfg.s3_bucket_name, key)
-        s3.upload_bytes(key, csv_bytes, content_type="text/csv")
-    except Exception:
-        logger.exception("S3 upload failed")
-        return 4
-
     # write local copy for CI artifact / debugging
     out_dir = REPO_ROOT / "exports"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -118,6 +118,14 @@ def main() -> int:
         local_path.write_bytes(csv_bytes)
     except Exception:
         logger.exception("Failed to write local copy of CSV (non-fatal)")
+
+    if not args.no_upload:
+        try:
+            logger.info("Uploading %s to s3://%s/%s", filename, s3_cfg.s3_bucket_name, key)
+            s3.upload_bytes(key, csv_bytes, content_type="text/csv")
+        except Exception:
+            logger.exception("S3 upload failed")
+            return 4
 
     logger.info("Export complete: s3://%s/%s", s3_cfg.s3_bucket_name, key)
     return 0
