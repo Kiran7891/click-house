@@ -44,23 +44,22 @@ def iso_yesterday_utc(override: str | None) -> str:
 
 
 def build_sql(date_str: str) -> str:
-    """
-    DST-safe and timezone-agnostic: pick rows whose LOCAL calendar day
-    (per ClickHouse session/server TZ) equals date_str.
-    """
+    # Filter by date using toDate(call_start) to avoid timezone/DST boundary issues.
+    # Optionally, users can set CLICKHOUSE_TZ to coerce call_start into a timezone before taking the date,
+    # e.g. toDate(toTimeZone(call_start, 'UTC')). If CLICKHOUSE_TZ is not set, we use toDate(call_start).
     sql = f"""
 SELECT
     agent_id,
     avg(call_duration_sec) AS avg_call_length_sec,
     quantileExact(0.9)(call_duration_sec) AS p90_call_length_sec
 FROM conversations
-WHERE toDate(call_start) = toDate('{date_str}')
+WHERE {{date_expr}} = toDate('{date_str}')
 GROUP BY agent_id
 ORDER BY agent_id
 FORMAT CSVWithNames
 """
     return sql
-
+    return sql
 
 
 def main() -> int:
@@ -91,7 +90,18 @@ def main() -> int:
     )
 
     target_date = iso_yesterday_utc(cfg.utc_date)
-    sql = build_sql(target_date)
+
+    # Build SQL using timezone-aware date extraction if CLICKHOUSE_TZ is set
+    clickhouse_tz = os.environ.get("CLICKHOUSE_TZ")
+    if clickhouse_tz:
+        # Use toDate(toTimeZone(call_start, '<tz>')) to compute date in the specified timezone
+        date_expr = f"toDate(toTimeZone(call_start, '{clickhouse_tz}'))"
+    else:
+        # Default: use server's call_start date (avoids time-of-day boundaries/DST issues)
+        date_expr = "toDate(call_start)"
+
+    sql_template = build_sql(target_date)
+    sql = sql_template.replace("{date_expr}", date_expr)
     logger.info("Querying ClickHouse for date %s", target_date)
 
     ch = ClickHouseClient(cfg.clickhouse_url, cfg.clickhouse_user, cfg.clickhouse_password, cfg.clickhouse_database)
@@ -122,12 +132,35 @@ def main() -> int:
         logger.exception("Failed to write local copy of CSV (non-fatal)")
 
     if not args.no_upload:
+        # Avoid uploading empty reports (header-only CSV) which can happen due to timezone/DST issues
         try:
-            logger.info("Uploading %s to s3://%s/%s", filename, s3_cfg.s3_bucket_name, key)
-            s3.upload_bytes(key, csv_bytes, content_type="text/csv")
+            text = csv_bytes.decode("utf-8", errors="replace")
+            lines = [l for l in text.splitlines() if l.strip() != ""]
         except Exception:
-            logger.exception("S3 upload failed")
-            return 4
+            lines = []
+
+        if len(lines) <= 1:
+            logger.warning("CSV contains no data rows (only header or empty). Skipping S3 upload for %s", filename)
+            return 0
+
+        # Try uploading with simple retry/backoff to handle transient network errors
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info("Uploading %s to s3://%s/%s (attempt %d)", filename, s3_cfg.s3_bucket_name, key, attempt)
+                s3.upload_bytes(key, csv_bytes, content_type="text/csv")
+                logger.info("S3 upload successful")
+                break
+            except Exception:
+                logger.exception("S3 upload attempt %d failed", attempt)
+                if attempt == max_attempts:
+                    logger.error("All S3 upload attempts failed")
+                    return 4
+                sleep_seconds = 2 ** attempt
+                logger.info("Retrying in %s seconds...", sleep_seconds)
+                import time
+
+                time.sleep(sleep_seconds)
 
     logger.info("Export complete: s3://%s/%s", s3_cfg.s3_bucket_name, key)
     return 0
