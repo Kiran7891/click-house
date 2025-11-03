@@ -53,8 +53,8 @@ SELECT
     quantileExact(0.9)(call_duration_sec) AS p90_call_length_sec
 FROM conversations
 WHERE call_status = 'Answered'
-  AND call_start >= toDateTime('{start}')
-  AND call_start < toDateTime('{start}') + INTERVAL 1 DAY
+  AND call_start >= toDate('{start}')
+  AND call_start < toDate('{start}') + INTERVAL 1 DAY
 GROUP BY agent_id
 ORDER BY agent_id
 FORMAT CSVWithNames
