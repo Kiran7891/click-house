@@ -163,7 +163,12 @@ def main() -> int:
         return 3
 
     if count == 0:
-        logger.error("No rows for %s using %s. Likely date/TZ mismatch or no data on that day. Aborting export.", target_date, date_expr)
+        logger.error(
+            "No rows for %s using utc window %s..%s. Likely date/TZ mismatch or no data on that day. Aborting export.",
+            target_date,
+            start_utc_str,
+            end_utc_str,
+        )
         # Write an EMPTY flag to make it obvious in CI artifacts
         out_dir = REPO_ROOT / "exports"
         out_dir.mkdir(parents=True, exist_ok=True)
