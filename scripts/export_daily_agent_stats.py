@@ -52,8 +52,7 @@ SELECT
     avg(call_duration_sec) AS avg_call_length_sec,
     quantileExact(0.9)(call_duration_sec) AS p90_call_length_sec
 FROM conversations
-WHERE call_start >= toDateTime('{start}')
-  AND call_start < toDateTime('{start}') + INTERVAL 1 DAY
+WHERE call_start = 2025-10-29 05:19:20
 GROUP BY agent_id
 ORDER BY agent_id
 FORMAT CSVWithNames
