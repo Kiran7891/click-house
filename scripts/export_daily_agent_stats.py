@@ -40,6 +40,7 @@ def resolve_export_date(override: str | None, tz_name: str | None) -> str:
     Returns YYYY-MM-DD.
     If override provided -> validate & return.
     Else compute 'yesterday' using tz_name (if set) or UTC.
+    Uses calendar-day arithmetic (date - 1 day) rather than subtracting 24 hours.
     """
     if override:
         dt.datetime.strptime(override, "%Y-%m-%d")
@@ -51,6 +52,41 @@ def resolve_export_date(override: str | None, tz_name: str | None) -> str:
         except Exception:
             logger.warning("Invalid CLICKHOUSE_TZ '%s'; falling back to UTC for date math", tz_name)
     return (dt.datetime.utcnow().date() - dt.timedelta(days=1)).isoformat()
+
+
+def make_utc_window_for_local_date(date_str: str, tz_name: str | None) -> tuple[str, str]:
+    """
+    Returns (start_utc_str, end_utc_str) where each is formatted as
+    'YYYY-MM-DD HH:MM:SS' in UTC. The window corresponds to the full
+    calendar day in the provided local timezone (midnight..next midnight).
+
+    This avoids DST-related nonexistent/ambiguous instants by doing
+    calendar-day arithmetic in the local zone and then converting to UTC.
+    """
+    # parse date
+    target_date = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
+    if tz_name:
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            logger.warning("Invalid CLICKHOUSE_TZ '%s'; falling back to UTC for window computation", tz_name)
+            tz = dt.timezone.utc
+    else:
+        tz = dt.timezone.utc
+
+    # local midnight (start of day) and next local midnight
+    start_local = dt.datetime.combine(target_date, dt.time(0, 0, 0), tzinfo=tz)
+    end_local = start_local + dt.timedelta(days=1)
+
+    # convert to UTC
+    start_utc = start_local.astimezone(dt.timezone.utc)
+    end_utc = end_local.astimezone(dt.timezone.utc)
+
+    # ClickHouse toDateTime(..., 'UTC') expects 'YYYY-MM-DD HH:MM:SS'
+    start_utc_str = start_utc.strftime("%Y-%m-%d %H:%M:%S")
+    end_utc_str = end_utc.strftime("%Y-%m-%d %H:%M:%S")
+    logger.debug("Time window for %s in tz=%s -> utc %s .. %s", date_str, tz_name or "UTC", start_utc_str, end_utc_str)
+    return start_utc_str, end_utc_str
 
 
 def build_sql_template() -> str:
@@ -104,27 +140,24 @@ def main() -> int:
         utc_date=env.get("EXPORT_DATE"),
     )
 
-    # Build the date expression for SQL and compute the correct "yesterday"
+    # Build the UTC start/end window for the local calendar day we'll export
     clickhouse_tz = env.get("CLICKHOUSE_TZ")
-    if clickhouse_tz:
-        # Use explicit TZ for date extraction
-        date_expr = f"toDate(toTimeZone(call_start, '{clickhouse_tz}'))"
-    else:
-        # Use server/session TZ implicitly
-        date_expr = "toDate(call_start)"
-
     target_date = resolve_export_date(cfg.utc_date, clickhouse_tz)
-    logger.info("Export date (YYYY-MM-DD): %s (CLICKHOUSE_TZ=%s)", target_date, clickhouse_tz or "<server/session>")
+    logger.info("Export date (YYYY-MM-DD): %s (CLICKHOUSE_TZ=%s)", target_date, clickhouse_tz or "UTC")
+    start_utc_str, end_utc_str = make_utc_window_for_local_date(target_date, clickhouse_tz)
 
     ch = ClickHouseClient(cfg.clickhouse_url, cfg.clickhouse_user, cfg.clickhouse_password, cfg.clickhouse_database)
 
     # Pre-flight: probe count so we don't silently write an empty CSV
-    count_sql = build_count_sql(date_expr, target_date)
+    count_sql = (
+        "SELECT count() AS n FROM conversations "
+        f"WHERE call_start >= toDateTime('{start_utc_str}','UTC') AND call_start < toDateTime('{end_utc_str}','UTC')"
+    )
     try:
         count_bytes = ch.query_csv(count_sql + " FORMAT CSV")
         row = count_bytes.decode("utf-8", errors="replace").strip().splitlines()[-1]
         count = int(row or "0")
-        logger.info("Row count for %s: %d", target_date, count)
+        logger.info("Row count for %s (utc-window %s..%s): %d", target_date, start_utc_str, end_utc_str, count)
     except Exception:
         logger.exception("Count probe failed")
         return 3
@@ -137,8 +170,11 @@ def main() -> int:
         (out_dir / f"agent_stats_{target_date}_EMPTY.flag").write_text("empty")
         return 5
 
-    # Build and run the real aggregation
-    sql = build_sql_template().format(date_expr=date_expr, date_str=target_date)
+    # Build and run the real aggregation using an explicit UTC time window
+    sql = (
+        build_sql_template()
+        + "\nWHERE call_start >= toDateTime('{start}','UTC') AND call_start < toDateTime('{end}','UTC')"
+    ).format(start=start_utc_str, end=end_utc_str)
     logger.info("Querying ClickHouse for aggregated stats...")
 
     try:
