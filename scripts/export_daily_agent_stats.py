@@ -44,22 +44,23 @@ def iso_yesterday_utc(override: str | None) -> str:
 
 
 def build_sql(date_str: str) -> str:
-    # Use toDateTime + INTERVAL 1 DAY for boundary correctness in ClickHouse
-    start = f"{date_str} 00:00:00"
+    """
+    DST-safe and timezone-agnostic: pick rows whose LOCAL calendar day
+    (per ClickHouse session/server TZ) equals date_str.
+    """
     sql = f"""
 SELECT
     agent_id,
     avg(call_duration_sec) AS avg_call_length_sec,
     quantileExact(0.9)(call_duration_sec) AS p90_call_length_sec
 FROM conversations
-WHERE call_status = 'Answered'
-  AND call_start >= toDate('{start}')
-  AND call_start < toDate('{start}') + INTERVAL 1 DAY
+WHERE toDate(call_start) = toDate('{date_str}')
 GROUP BY agent_id
 ORDER BY agent_id
 FORMAT CSVWithNames
 """
     return sql
+
 
 
 def main() -> int:
