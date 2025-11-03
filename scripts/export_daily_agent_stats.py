@@ -52,7 +52,8 @@ SELECT
     avg(call_duration_sec) AS avg_call_length_sec,
     quantileExact(0.9)(call_duration_sec) AS p90_call_length_sec
 FROM conversations
-WHERE call_start >= toDateTime('{start}')
+WHERE call_status = 'Answered'
+  AND call_start >= toDateTime('{start}')
   AND call_start < toDateTime('{start}') + INTERVAL 1 DAY
 GROUP BY agent_id
 ORDER BY agent_id
